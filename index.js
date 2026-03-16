@@ -4,7 +4,13 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import fs from "fs";
 import { execSync } from "child_process";
 
-dotenv.config();
+import { fileURLToPath } from "url";
+import path from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, ".env") });
 
 const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) {
@@ -20,10 +26,8 @@ const userPrompt = args.slice(1).join(" ");
 
 async function run() {
   try {
-    const systemInstruction = fs.readFileSync(
-      `./skills/${skillName}.md`,
-      "utf8",
-    );
+    const skillPath = path.join(__dirname, "skills", `${skillName}.md`);
+    const systemInstruction = fs.readFileSync(skillPath, "utf8");
 
     const model = genAI.getGenerativeModel({
       model: "gemini-3-flash-preview",

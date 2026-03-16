@@ -1,0 +1,12 @@
+{
+  "name": "gemini-stack",
+  "version": "1.0.0",
+  "description": "A custom CLI tool using Gemini API",
+  "type": "module",
+  "bin": {
+    "g-stack": "./index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.11.0"
+  }
+}

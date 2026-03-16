@@ -25,6 +25,14 @@ const skillArgs = args.slice(1);
 const isFullMode = skillArgs.includes("--full");
 const userPrompt = skillArgs.filter((a) => !a.startsWith("--")).join(" ");
 
+// Max characters per chunk sent to Gemini.
+// ~150k chars ≈ ~37k tokens — safely under the 250k token/min free tier limit.
+// Increase to 400000 if you are on a paid tier.
+const CHUNK_SIZE_CHARS = 150_000;
+
+// Delay between chunk requests (ms) to respect per-minute rate limits.
+const CHUNK_DELAY_MS = 5_000;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function tryExec(cmd) {
@@ -35,6 +43,10 @@ function tryExec(cmd) {
   } catch {
     return null;
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── Language detection ────────────────────────────────────────────────────────
@@ -55,7 +67,6 @@ const LANGUAGE_EXTS = {
   scala: [".scala"],
 };
 
-// Always include these config/doc formats regardless of language
 const ALWAYS_INCLUDE = [
   ".json",
   ".yaml",
@@ -71,7 +82,6 @@ const ALWAYS_INCLUDE = [
   ".ps1",
 ];
 
-// Artifacts/binaries to always exclude
 const EXCLUDE_PATTERN = new RegExp(
   [
     "node_modules",
@@ -107,14 +117,11 @@ function detectLanguages(files) {
     const ext = path.extname(f).toLowerCase();
     if (ext) extCount[ext] = (extCount[ext] || 0) + 1;
   }
-
   const detected = [];
   for (const [lang, exts] of Object.entries(LANGUAGE_EXTS)) {
     const count = exts.reduce((sum, e) => sum + (extCount[e] || 0), 0);
     if (count > 0) detected.push({ lang, count });
   }
-
-  // Sort by file count descending so primary language is listed first
   detected.sort((a, b) => b.count - a.count);
   return detected.map((d) => d.lang);
 }
@@ -126,8 +133,6 @@ function buildIncludePattern(langs) {
   return new RegExp(`(${escaped.join("|")})$`, "i");
 }
 
-// ── File collection ───────────────────────────────────────────────────────────
-
 function collectProjectFiles() {
   const result = tryExec("git ls-files");
   if (!result) return { files: [], langs: [] };
@@ -136,7 +141,6 @@ function collectProjectFiles() {
   const langs = detectLanguages(allFiles);
 
   if (langs.length === 0) {
-    // No recognised language — include everything that isn't a binary/artifact
     const files = allFiles.filter((f) => !EXCLUDE_PATTERN.test(f));
     return { files, langs: ["unknown"] };
   }
@@ -145,60 +149,163 @@ function collectProjectFiles() {
   const files = allFiles.filter(
     (f) => !EXCLUDE_PATTERN.test(f) && includePattern.test(f),
   );
-
   return { files, langs };
 }
 
-// ── Review context builders ───────────────────────────────────────────────────
+// ── Chunking ──────────────────────────────────────────────────────────────────
 
-async function buildReviewContext() {
-  // ── FULL MODE ──────────────────────────────────────────────────────────────
-  if (isFullMode) {
-    console.log("Full project review mode — detecting languages...");
+/**
+ * Split files into chunks where each chunk's total character count
+ * stays under CHUNK_SIZE_CHARS. A single file that exceeds the limit
+ * is included alone in its own chunk (truncated with a warning).
+ */
+function chunkFiles(files) {
+  const chunks = [];
+  let current = [];
+  let currentSize = 0;
 
-    const { files, langs } = collectProjectFiles();
-
-    if (files.length === 0) {
-      console.error(
-        "No source files found. Make sure you're inside a git repository.",
-      );
-      process.exit(1);
+  for (const f of files) {
+    let content;
+    try {
+      content = fs.readFileSync(f, "utf8");
+    } catch {
+      content = "[Could not read file]";
     }
 
-    console.log(`Detected: ${langs.join(", ")}`);
-    console.log(`Scanning ${files.length} files...\n`);
+    const block = `\n${"=".repeat(60)}\nFILE: ${f}\n${"=".repeat(60)}\n${content}`;
+    const blockSize = block.length;
 
-    const fileContents = files
-      .map((f) => {
-        try {
-          const content = fs.readFileSync(f, "utf8");
-          return `\n${"=".repeat(60)}\nFILE: ${f}\n${"=".repeat(60)}\n${content}`;
-        } catch {
-          return `\nFILE: ${f}\n[Could not read file]`;
-        }
-      })
-      .join("\n");
+    // If this single file is larger than the chunk limit, truncate it
+    const safeBlock =
+      blockSize > CHUNK_SIZE_CHARS
+        ? block.slice(0, CHUNK_SIZE_CHARS) +
+          `\n... [TRUNCATED — file exceeds ${CHUNK_SIZE_CHARS} chars]`
+        : block;
 
-    return (
-      `Full project audit — ${files.length} files, detected languages: ${langs.join(", ")}.\n\n` +
-      `Review the ENTIRE codebase below for:\n` +
-      `- Bugs, logic flaws, and security vulnerabilities\n` +
-      `- Missing error handling and edge cases\n` +
-      `- LLM/AI trust boundary violations (unvalidated model output written to DB or passed to dangerous sinks)\n` +
-      `- Hardcoded secrets, API keys, or credentials\n` +
-      `- Deprecated or risky dependency usage\n` +
-      `- Dead code, orphaned files, and unused imports\n` +
-      `- Missing environment variable documentation (.env.example gaps)\n` +
-      `- Source files with no corresponding test file\n` +
-      `- Inline TODO/FIXME/HACK comments not tracked in TODOS.md\n` +
-      `- Race conditions and concurrency issues\n` +
-      `- Poor separation of concerns or structural red flags\n\n` +
-      `Be terse: one line per problem, one line for the fix. Cite file:line. Skip anything that's fine.\n\n` +
-      fileContents
-    );
+    if (
+      currentSize + safeBlock.length > CHUNK_SIZE_CHARS &&
+      current.length > 0
+    ) {
+      chunks.push(current);
+      current = [];
+      currentSize = 0;
+    }
+
+    current.push({ file: f, block: safeBlock });
+    currentSize += safeBlock.length;
   }
 
-  // ── PR MODE: diff against origin/main ─────────────────────────────────────
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+// ── Gemini call ───────────────────────────────────────────────────────────────
+
+async function callGemini(model, context) {
+  const result = await model.generateContent(context);
+  return result.response.text();
+}
+
+// ── Full-mode chunked review ──────────────────────────────────────────────────
+
+async function runFullReview(model, files, langs) {
+  const chunks = chunkFiles(files);
+  const totalChunks = chunks.length;
+
+  if (totalChunks === 1) {
+    // Small project — single request, same as before
+    const fileContents = chunks[0].map((c) => c.block).join("\n");
+    const context =
+      `Full project audit — ${files.length} files, languages: ${langs.join(", ")}.\n\n` +
+      buildFullPromptInstructions() +
+      fileContents;
+
+    console.log(`\nThinking from the perspective of [${skillName}]...\n`);
+    const response = await callGemini(model, context);
+    console.log(response);
+    return;
+  }
+
+  // Large project — process in chunks, then summarise
+  console.log(
+    `Project is large — splitting into ${totalChunks} chunks to stay within token limits.\n`,
+  );
+
+  const chunkFindings = [];
+
+  for (let i = 0; i < totalChunks; i++) {
+    const chunk = chunks[i];
+    const fileList = chunk.map((c) => c.file).join(", ");
+    console.log(
+      `Reviewing chunk ${i + 1}/${totalChunks} (${chunk.length} files)...`,
+    );
+
+    const fileContents = chunk.map((c) => c.block).join("\n");
+    const context =
+      `Full project audit — chunk ${i + 1} of ${totalChunks}.\n` +
+      `Files in this chunk: ${fileList}\n\n` +
+      buildFullPromptInstructions() +
+      `Return ONLY the issues found in these files. ` +
+      `Format each issue as: [file:line] Problem — Fix\n\n` +
+      fileContents;
+
+    const response = await callGemini(model, context);
+    chunkFindings.push(
+      `--- Chunk ${i + 1} (${chunk.length} files) ---\n${response}`,
+    );
+
+    // Wait between chunks to avoid per-minute token limit
+    if (i < totalChunks - 1) {
+      console.log(`  Waiting ${CHUNK_DELAY_MS / 1000}s before next chunk...`);
+      await sleep(CHUNK_DELAY_MS);
+    }
+  }
+
+  // Final pass: merge and de-duplicate findings
+  console.log(`\nMerging findings from all ${totalChunks} chunks...\n`);
+  await sleep(CHUNK_DELAY_MS);
+
+  const mergeContext =
+    `You reviewed a project in ${totalChunks} chunks. Here are the raw findings from each chunk:\n\n` +
+    chunkFindings.join("\n\n") +
+    `\n\nNow produce a single consolidated report:\n` +
+    `1. De-duplicate — if the same issue appears in multiple chunks, list it once.\n` +
+    `2. Sort by severity: CRITICAL issues first, then informational.\n` +
+    `3. Format:\n\n` +
+    `   Full Project Review: N issues (X critical, Y informational)\n\n` +
+    `   **CRITICAL:**\n` +
+    `   - [file:line] Problem\n` +
+    `     Fix: suggested fix\n\n` +
+    `   **Issues:**\n` +
+    `   - [file:line] Problem\n` +
+    `     Fix: suggested fix\n\n` +
+    `Be terse. No preamble. Only real problems.`;
+
+  console.log(`\nThinking from the perspective of [${skillName}]...\n`);
+  const summary = await callGemini(model, mergeContext);
+  console.log(summary);
+}
+
+function buildFullPromptInstructions() {
+  return (
+    `Review the code below for:\n` +
+    `- Bugs, logic flaws, and security vulnerabilities\n` +
+    `- Missing error handling and edge cases\n` +
+    `- LLM/AI trust boundary violations\n` +
+    `- Hardcoded secrets, API keys, or credentials\n` +
+    `- Deprecated or risky dependency usage\n` +
+    `- Dead code, orphaned files, and unused imports\n` +
+    `- Race conditions and concurrency issues\n` +
+    `- Source files with no corresponding test file\n` +
+    `- Inline TODO/FIXME/HACK comments\n\n` +
+    `Be terse: one line per problem, one line for the fix. Cite file:line. Skip anything fine.\n\n`
+  );
+}
+
+// ── Review context (PR / uncommitted modes) ───────────────────────────────────
+
+async function buildReviewContext() {
+  // PR MODE
   tryExec("git fetch origin main --quiet");
   const prDiff = tryExec("git diff origin/main");
 
@@ -212,7 +319,7 @@ async function buildReviewContext() {
     );
   }
 
-  // ── FALLBACK: uncommitted changes ─────────────────────────────────────────
+  // FALLBACK: uncommitted changes
   const uncommitted = tryExec("git diff HEAD");
 
   if (uncommitted) {
@@ -224,7 +331,6 @@ async function buildReviewContext() {
     );
   }
 
-  // ── NOTHING TO REVIEW ─────────────────────────────────────────────────────
   console.log(
     "Nothing to review — no diff against origin/main and no uncommitted changes.",
   );
@@ -244,14 +350,29 @@ async function run() {
       systemInstruction: systemInstruction,
     });
 
-    let context = userPrompt;
+    if (skillName === "review" && isFullMode) {
+      console.log("Full project review mode — detecting languages...");
+      const { files, langs } = collectProjectFiles();
 
+      if (files.length === 0) {
+        console.error(
+          "No source files found. Make sure you're inside a git repository.",
+        );
+        process.exit(1);
+      }
+
+      console.log(`Detected: ${langs.join(", ")}`);
+      console.log(`Scanning ${files.length} files...\n`);
+      await runFullReview(model, files, langs);
+      return;
+    }
+
+    let context = userPrompt;
     if (skillName === "review") {
       context = await buildReviewContext();
     }
 
     console.log(`\nThinking from the perspective of [${skillName}]...\n`);
-
     const result = await model.generateContent(context);
     console.log(result.response.text());
   } catch (error) {

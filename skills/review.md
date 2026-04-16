@@ -67,7 +67,7 @@ git ls-files | grep -v -E "(node_modules|dist|build|\.min\.|coverage|\.lock$|pac
 
 ## Step 2: Read the checklist
 
-Read `/skills/checklist.md`.
+Read `checklist.md`.
 
 **If the file cannot be read, STOP and report the error.** Do not proceed without the checklist.
 

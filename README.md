@@ -2,19 +2,28 @@
 
 `gemini-stack` is a powerful Gemini-powered CLI tool designed to streamline development workflows. It leverages the Google Gemini API to provide intelligent code reviews, automated shipping workflows, and product/engineering planning assistance.
 
+## Why gemini-stack?
+
+Instead of defining AI skills and prompts on a per-project basis (e.g., inside a `.agents/skills` folder for every repository), `gemini-stack` centralizes them into a single CLI. This provides several key advantages:
+
+- **Single Source of Truth**: Improve a system prompt once, and all your projects immediately benefit without syncing changes across multiple codebases.
+- **Global Access**: By linking globally (`npm link`), you can `cd` into *any* project folder—even a quick prototype—and instantly run `g-stack review` or `g-stack ship`.
+- **Cleaner Project Repositories**: Individual project repositories stay focused on their domain logic, avoiding pollution with AI boilerplate files and execution scripts.
+- **Centralized Secrets**: Maintain your `GEMINI_API_KEY` in one secure location rather than duplicating it across dozens of different projects.
+
 ## Features
 
 `gemini-stack` provides several "skills" to help you in different stages of development:
 
-- **`review`**: Performs automated code reviews. 
-    - Analyzes uncommitted changes or PR diffs against `origin/main`.
-    - Use `--full` mode to audit the entire codebase.
+- **`review`**: Performs automated code reviews.
+  - Analyzes uncommitted changes or PR diffs against `origin/main`.
+  - Use `--full` mode to audit the entire codebase.
 - **`ship`**: A non-interactive, fully automated workflow to ship your code.
-    - Merges `main`, runs tests/evals, performs a pre-landing review, bumps versions, updates CHANGELOG/TODOS, and creates a PR.
+  - Merges `main`, runs tests/evals, performs a pre-landing review, bumps versions, updates CHANGELOG/TODOS, and creates a PR.
 - **`plan-ceo`**: Get product vision feedback from a "rigorous CEO".
-    - Evaluates feature ideas and provides sharp, critical pushback to find the "10-star" version.
+  - Evaluates feature ideas and provides sharp, critical pushback to find the "10-star" version.
 - **`plan-eng`**: Generate high-level technical plans from a "Senior Engineer".
-    - Focuses on architecture, resilience, state management, and error handling.
+  - Focuses on architecture, resilience, state management, and error handling.
 - **`checklist`**: The underlying pre-landing review checklist used by `ship` and `review`.
 
 ## Setup
@@ -27,18 +36,21 @@
 ### Installation
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/your-repo/gemini-stack.git
    cd gemini-stack
    ```
 
 2. Install dependencies:
+
    ```bash
    npm install
    ```
 
 3. Configure environment variables:
    Create a `.env` file in the root directory and add your API key:
+
    ```env
    GEMINI_API_KEY=your_actual_api_key_here
    ```
@@ -52,6 +64,7 @@
 ## Usage
 
 The basic syntax is:
+
 ```bash
 g-stack <skill-name> [options] [prompt]
 ```
@@ -59,27 +72,37 @@ g-stack <skill-name> [options] [prompt]
 ### Examples
 
 #### Automated Code Review
+
 Review uncommitted changes:
+
 ```bash
 g-stack review
 ```
+
 Review the entire project:
+
 ```bash
 g-stack review --full
 ```
 
 #### Shipping a Feature
+
 Run the automated shipping workflow (best from a feature branch):
+
 ```bash
 g-stack ship
 ```
 
 #### Planning a New Feature
+
 Get product feedback:
+
 ```bash
 g-stack plan-ceo "I want to add a real-time collaboration feature to the editor"
 ```
+
 Get a technical implementation plan:
+
 ```bash
 g-stack plan-eng "Implementing a WebSocket-based sync engine for the editor"
 ```

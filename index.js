@@ -23,7 +23,40 @@ const args = process.argv.slice(2);
 const skillName = args[0];
 const skillArgs = args.slice(1);
 const isFullMode = skillArgs.includes("--full");
-const userPrompt = skillArgs.filter((a) => !a.startsWith("--")).join(" ");
+let userPrompt = skillArgs.filter((a) => !a.startsWith("--")).join(" ");
+
+if (!process.stdin.isTTY) {
+  for await (const chunk of process.stdin) {
+    userPrompt += chunk;
+  }
+  userPrompt = userPrompt.trim();
+}
+
+const SKILLS_DIR = path.join(__dirname, "skills");
+
+function listAvailableSkills() {
+  try {
+    const files = fs.readdirSync(SKILLS_DIR);
+    return files
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => f.replace(".md", ""));
+  } catch {
+    return [];
+  }
+}
+
+if (!skillName || skillName === "--help" || skillName === "-h") {
+  const available = listAvailableSkills();
+  console.log("\nUsage: g-stack <skill> [prompt] [--full]\n");
+  console.log("Available skills:");
+  available.forEach((s) => console.log(`  - ${s}`));
+  console.log("\nExamples:");
+  console.log("  g-stack review");
+  console.log("  g-stack review --full");
+  console.log("  g-stack plan-eng Create a login page\n");
+  process.exit(0);
+}
+
 
 // Max characters per chunk sent to Gemini.
 // ~150k chars ≈ ~37k tokens — safely under the 250k token/min free tier limit.
@@ -342,8 +375,18 @@ async function buildReviewContext() {
 
 async function run() {
   try {
-    const skillPath = path.join(__dirname, "skills", `${skillName}.md`);
+    const skillPath = path.join(SKILLS_DIR, `${skillName}.md`);
+    
+    if (!fs.existsSync(skillPath)) {
+      console.error(`Error: Skill "${skillName}" not found.`);
+      const available = listAvailableSkills();
+      console.log("\nAvailable skills:");
+      available.forEach((s) => console.log(`  - ${s}`));
+      process.exit(1);
+    }
+    
     const systemInstruction = fs.readFileSync(skillPath, "utf8");
+
 
     const model = genAI.getGenerativeModel({
       model: "gemini-3-flash-preview",
@@ -370,14 +413,24 @@ async function run() {
     let context = userPrompt;
     if (skillName === "review") {
       context = await buildReviewContext();
+    } else if (!userPrompt) {
+      console.error(`Error: Skill "${skillName}" requires a prompt.`);
+      console.log(`Usage: g-stack ${skillName} "Your prompt here"`);
+      process.exit(1);
     }
+
 
     console.log(`\nThinking from the perspective of [${skillName}]...\n`);
     const result = await model.generateContent(context);
     console.log(result.response.text());
   } catch (error) {
-    console.error("Error:", error.message);
+    if (error.response) {
+      console.error("API Error:", error.response.text ? await error.response.text() : error.response);
+    } else {
+      console.error("Error:", error);
+    }
   }
+
 }
 
 run();
